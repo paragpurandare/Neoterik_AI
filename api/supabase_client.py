@@ -39,7 +39,7 @@ async def verify_jwt_token(
             id_info = google_id_token.verify_oauth2_token(
                 token,
                 google_requests.Request(),
-                "673952800423-49dff09sf3u9io5ah8d9l0s47vvfjr47.apps.googleusercontent.com"
+                "394042316648-k1jjdti24gso3docgh4sc3apiepgh90f.apps.googleusercontent.com"
             )
             user_id = id_info.get("sub")
             if not user_id:

@@ -41,8 +41,15 @@ function handleSignOut() {
 
 // === Auth Callback Handler ===
 const handledAuthTabs = new Set();
+let signInInProgress = false;
 async function handleAuthCallback(tabId, url) {
-    if (handledAuthTabs.has(tabId)) return;
+    if (signInInProgress) return;
+    signInInProgress = true;
+    if (handledAuthTabs.has(tabId)) {
+        console.warn("Auth callback already handled for tab:", tabId);
+        signInInProgress = false;
+        return;
+    }
     handledAuthTabs.add(tabId);
 
     try {
@@ -86,7 +93,7 @@ async function handleAuthCallback(tabId, url) {
                 console.log("🔑 Session result from server:", session);
                 notifyLoginStatusChanged();
                 setTimeout(() => {
-                    chrome.tabs.remove(tabId).catch(/*...*/);
+                    chrome.tabs.update(tabId, { url: "http://localhost:3000/profile" }); // Redirect to profile or home
                 }, 1000);
             }
         } else {
@@ -94,6 +101,9 @@ async function handleAuthCallback(tabId, url) {
         }
     } catch (error) {
         console.error("Error during auth callback:", error);
+    }
+    finally {
+        signInInProgress = false;
     }
 }
 
@@ -190,7 +200,7 @@ function pollResearchTaskStatus(taskId, session) {
                         ...jobSession,
                         isAgentInProgress: false,
                         isAgentFinished: true,
-                        isLocked: true,
+                        isLocked: false,
                     },
                 });
 

@@ -32,6 +32,8 @@ chromadb = "^1.0.15"
 sentence-transformers = "^5.0.0"
 supabase = ">=2.16.0,<3.0.0"
 celery = {extras = ["eventlet"], version = "^5.5.3"}
+eventlet = "^0.40.2"
+fpdf = "^1.7.2"
 
 [build-system]
 requires = ["poetry-core"]

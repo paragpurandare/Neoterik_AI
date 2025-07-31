@@ -1,9 +1,14 @@
 import asyncio
 from celery import Celery
 from kombu import Queue
+import nest_asyncio
 
 from agents.langgraph_workflow.unified_workflow import build_graph
 from company_research_graph import run_job_research
+
+# Apply nest_asyncio once at the start of your Celery worker's execution context
+# This is typically done at the module level or in a worker startup hook
+nest_asyncio.apply()
 
 # Initalize the celery app
 celery_app = Celery(
@@ -24,6 +29,9 @@ celery_app.conf.task_routes = {
     "run_job_research_task": {"queue": "company-research-queue", "routing_key": "task.research"},
 }
 
+def run_async(coro):
+    return asyncio.run(coro)
+
 # Define the celery task
 @celery_app.task(name="run_cover_letter_workflow")
 def run_unified_workflow_task(initial_state: dict):
@@ -36,7 +44,7 @@ def run_unified_workflow_task(initial_state: dict):
 
     app = build_graph()
 
-    final_state = asyncio.run(app.ainvoke(initial_state))
+    final_state = run_async(app.ainvoke(initial_state))
 
     print("Workflow finished. Returning final context.")
     # Return the 'context' dictionary from the final state, 
@@ -51,6 +59,6 @@ def run_job_research_task(job_url: str):
     """
     print(f"Starting company research task for URL: {job_url}")
     # [cite_start]This function comes from your company_search_agent.txt file [cite: 48]
-    result = asyncio.run(run_job_research(job_url))
+    result = run_async(run_job_research(job_url))
     print("Company Research finished.")
     return result.model_dump() if result else None

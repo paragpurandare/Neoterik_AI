@@ -361,26 +361,85 @@ def extract_company_name(soup: BeautifulSoup, job_title: str, body_text: str) ->
     return soup.title.text.strip() if soup.title else "Unknown"
 
 # 🧠 Node: Detect job page
+# ✅ STEP 1: Lightweight URL-based pattern filter
+def looks_like_job_url(url: str) -> bool:
+    job_url_patterns = [
+        r"/careers?", r"/career?", r"/jobs?/", r"/job[-_]?details?", r"/openings/",
+        r"/positions/", r"/vacancy", r"/hiring", r"/apply", r"jobId=\d+",
+        r"/public/jobs/\d+", r"/jobs/\d+", r"/job-postings/", r"/job-listings/",
+    ]
+    return any(re.search(pat, url.lower()) for pat in job_url_patterns)
+
+# ✅ STEP 2: Main detection node with DOM structure validation
 async def detect_node(state):
     url = state["job_url"]
+
+    # 🛑 1. Early exit if URL doesn't even look like a job page
+    if not looks_like_job_url(url):
+        print("❌ URL pattern doesn’t look like a job page.")
+        state.update({
+            "is_job_page": False,
+            "scraped_html": "",
+            "job_title": "",
+            "company_name": "Unknown"
+        })
+        return state
+
+    # ✅ 2. Perform scraping
     html = await scrape_with_playwright(url)
     soup = BeautifulSoup(html, "html.parser")
-    text = soup.get_text(separator="\n").lower()
+    raw_text = soup.get_text(separator="\n").lower()
 
-    patterns = [r"careers", r"jobs?",  r"job[-_\s]?listingr", r"job-listing", r"apply", r"openings", r"vacancy", r"position", r"role"]
-    match_url = any(re.search(p, url.lower()) for p in patterns)
-    title_hit = soup.title and any(k in soup.title.text.lower() for k in ["job", "role"])
-    meta_hit = any("job" in tag.get("content", "").lower() for tag in soup.find_all("meta"))
-    body_hit = sum(1 for k in ["job", "jobs", "career", "intern", "responsibility"] if k in text)
+    # ✅ 3. Section detection logic
+    def has_section_heading(keywords):
+        headings = soup.find_all(["h1", "h2", "h3", "strong", "b", "p"])
+        for el in headings:
+            text = el.get_text(strip=True)
+            for kw in keywords:
+                if re.search(rf"\b{re.escape(kw)}\b", text, re.IGNORECASE):
+                    return True
+        return False
 
-    is_job = match_url or title_hit or meta_hit or body_hit >= 1
-    print("Is Job page: ?", is_job)
+    def has_apply_cta():
+        apply_keywords = ["apply now", "submit application", "apply for this job"]
+        return any(
+            any(kw in btn.get_text(strip=True).lower() for kw in apply_keywords)
+            for btn in soup.find_all(["a", "button"])
+        )
+
+    def has_job_form():
+        forms = soup.find_all("form")
+        return any("apply" in str(form).lower() for form in forms)
+
+    def has_text_block():
+        return len(raw_text) > 1200  # ⬅️ Adjust this threshold if needed
+
+    job_section_keywords = [
+        ["job description"],
+        ["key responsibilities", "responsibilities", "what you’ll do", "role overview", "expectations"],
+        ["qualifications", "preferred qualifications", "requirements"],
+        ["skills", "technologies", "stack", "tools"]
+    ]
+
+    section_hits = sum(has_section_heading(kws) for kws in job_section_keywords)
+    apply_cta = has_apply_cta()
+    job_form = has_job_form()
+    long_content = has_text_block()
+
+    is_job = section_hits >= 2 and (apply_cta or job_form or long_content)
+
+    title = soup.title.text.strip() if soup.title else "Unknown Title"
+    company = extract_company_name(soup, title, raw_text)
+
+    # ✅ 4. Update graph state
     state.update({
         "is_job_page": is_job,
         "scraped_html": soup.get_text(),
-        "job_title": soup.title.text.strip() if soup.title else "Unknown Title",
-        "company_name": extract_company_name(soup, state.get("job_title", ""), soup.get_text())
+        "job_title": title,
+        "company_name": company
     })
+
+    print(f"🧠 [detect_node] DETECTED: {is_job}, Sections: {section_hits}, Apply CTA: {apply_cta}, Title: {title}, Company: {company}")
     return state
 
 # 🔍 Node: Search
@@ -463,6 +522,8 @@ class GraphState(TypedDict):
     company_name: str
     search_results: str
     job_search_results: str
+    job_summary_info: str
+    linkedin_results: str
     messages: List
     final_output: str
 
@@ -492,9 +553,13 @@ def build_graph():
     graph.add_node("agent", react_agent)
     graph.add_node("tools", ToolNode(tools=[search_tool]))
     graph.add_node("capture", capture_output)
-
+    
     graph.set_entry_point("detect")
-    graph.add_conditional_edges("detect", lambda s: "search" if s["is_job_page"] else END, {"search": "search", END: END})
+    graph.add_conditional_edges(
+        "detect",
+        lambda state: "search" if state["is_job_page"] else END,
+        {"search": "search", END: END}
+    )
     graph.add_edge("search", "prepare")
     graph.add_edge("prepare", "agent")
     graph.add_conditional_edges("agent", tools_condition)
@@ -504,26 +569,34 @@ def build_graph():
     return graph.compile()
 
 # 🚀 Runner
-async def run_job_research(job_url: str):
-    print(f"\n🔍 Processing: {job_url}")
+async def run_job_research(job_url: str) -> CompanyResearchOutput | None:
+    """
+    The main execution function to run the job research agent.
+    """
+    print(f"\n Initializing job research for: {job_url}")
     graph = build_graph()
-    print("Graph built")
-    state = GraphState(
-        job_url=job_url, is_job_page=False, scraped_html="",
-        job_title="", company_name="", search_results="",
-        job_search_results="", messages=[], final_output=""
+    
+    initial_state = GraphState(
+        job_url=job_url,
+        is_job_page=False,
+        scraped_html_text="",
+        job_title="",
+        company_name="",
+        search_results="",
+        job_search_results="",
+        job_summary_info="",
+        linkedin_results="",
+        messages=[],
+        final_output=None
     )
-    result = await graph.ainvoke(state)
-    if result.get("final_output"):
-        # print("✅ LLM Output:\n", result["final_output"][:800])
+    
+    final_state = await graph.ainvoke(initial_state)
+    
+    if final_state and final_state.get("final_output"):
+        print("\n Research complete. Final output generated.")
         try:
-            parsed = parse_llm_output(result["final_output"])
-            # with open("output_job_data.json", "w", encoding="utf-8") as f:
-            #     json.dump(parsed.model_dump(), f, indent=2, ensure_ascii=False)
-            return parsed
+            parsed = parse_llm_output(final_state["final_output"])
+            return parsed  # <-- This is a Pydantic model
         except Exception as e:
             print(f"⚠️ Parse Error: {e}")
-    else:
-        print("❌ No LLM Output")
-    return None
-    
+            return None

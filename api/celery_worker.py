@@ -54,4 +54,3 @@ def run_job_research_task(job_url: str):
     result = asyncio.run(run_job_research(job_url))
     print("Company Research finished.")
     return result.model_dump() if result else None
-

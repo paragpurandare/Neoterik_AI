@@ -291,7 +291,7 @@ async function checkUrlWithApi(url, tabId) {
 
 		const data = await response.json();
 
-		if (data.is_job_application) {
+        if (data.is_job_application) {
 			detectedJobsPerTab[tabId] = {
 				url,
 				jobData: data?.parsed_output || null,
@@ -682,8 +682,13 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 	}
 
 	if (
-		tab.url.startsWith("http") &&
-		!tab.url.startsWith("chrome-extension://") &&
+        tab.url.startsWith("http://") || tab.url.startsWith("https://") &&
+        !tab.url.startsWith("chrome://") &&
+        !tab.url.startsWith("chrome-extension://") &&
+        !tab.url.startsWith("http://localhost:3000") &&
+        !tab.url.startsWith("https://localhost:3000") &&
+        !tab.url.startsWith("http://localhost:8000") &&
+        !tab.url.startsWith("https://localhost:8000") &&
 		!tab.url.startsWith(EXTENSION_CALLBACK_URL)
 	)
 		if (checkUrlTimers[tabId]) clearTimeout(checkUrlTimers[tabId]);

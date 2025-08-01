@@ -401,7 +401,7 @@ async def detect_node(state):
         return False
 
     def has_apply_cta():
-        apply_keywords = ["apply now", "submit application", "apply for this job"]
+        apply_keywords = ["apply now", "submit application", "apply for this job", "job info"]
         return any(
             any(kw in btn.get_text(strip=True).lower() for kw in apply_keywords)
             for btn in soup.find_all(["a", "button"])
@@ -416,7 +416,7 @@ async def detect_node(state):
 
     job_section_keywords = [
         ["job description"],
-        ["key responsibilities", "responsibilities", "what you’ll do", "role overview", "expectations"],
+        ["key responsibilities", "responsibilities", "what you’ll do", "role overview", "expectations", "What's this role about?", "core skills", "desired skills", "role requirements", "job requirements", "Your role", "What's this role about?"],
         ["qualifications", "preferred qualifications", "requirements"],
         ["skills", "technologies", "stack", "tools"]
     ]
@@ -426,7 +426,7 @@ async def detect_node(state):
     job_form = has_job_form()
     long_content = has_text_block()
 
-    is_job = section_hits >= 2 and (apply_cta or job_form or long_content)
+    is_job = section_hits >= 1 and (apply_cta or job_form or long_content)
 
     title = soup.title.text.strip() if soup.title else "Unknown Title"
     company = extract_company_name(soup, title, raw_text)

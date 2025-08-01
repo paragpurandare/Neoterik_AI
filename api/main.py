@@ -525,26 +525,39 @@ class DownloadRequest(BaseModel):
     coverLetterText: str
 
 # The new endpoint for generating and downloading files
+# filepath: [main.py](http://_vscodecontentref_/0)
+
+import re
+import unicodedata
+def clean_cover_letter(text: str) -> str:
+    # Remove unwanted patterns: __, --, ``, and excessive whitespace
+    cleaned = re.sub(r'(__+|--+|``+)', ' ', text)
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    cleaned = cleaned.strip()
+    # Replace non-latin-1 characters with closest ASCII equivalent
+    cleaned = unicodedata.normalize('NFKD', cleaned).encode('latin1', 'replace').decode('latin1')
+    return cleaned
+
 @app.post("/download-cover-letter")
 async def download_cover_letter(request: DownloadRequest):
     """
     Generates a file (PDF or TXT) on the server and returns it for download.
+    Cleans the content and encodes as UTF-8.
     """
     filename = f"{request.baseFilename}.{request.fileType}"
-    
+    cleaned_text = clean_cover_letter(request.coverLetterText)
+
     if request.fileType == 'pdf':
-        # --- PDF Generation using FPDF2 ---
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Helvetica", size=11)
-        
-        # Use multi_cell for automatic line breaks and text wrapping
-        pdf.multi_cell(0, 5, request.coverLetterText)
-        
-        # Generate the PDF content as bytes (fpdf2 now returns bytearray)
+        pdf.multi_cell(0, 5, cleaned_text)
         raw = pdf.output(dest='S')
-        pdf_content_bytes = bytes(raw)  # cast bytearray → bytes
-
+        # FPDF PDF output is latin1, but for broad compatibility use utf-8 if possible
+        if isinstance(raw, str):
+            pdf_content_bytes = raw.encode('latin1')
+        else:
+            pdf_content_bytes = bytes(raw)
         return Response(
             content=pdf_content_bytes,
             media_type='application/pdf',
@@ -552,11 +565,10 @@ async def download_cover_letter(request: DownloadRequest):
         )
 
     elif request.fileType == 'txt':
-        # --- TXT File Generation ---
         return Response(
-            content=request.coverLetterText,
-            media_type='text/plain',
+            content=cleaned_text.encode('utf-8'),
+            media_type='text/plain; charset=utf-8',
             headers={'Content-Disposition': f'attachment; filename="{filename}"'}
         )
     
-    return {"error": "Unsupported file type"}, 400
+    return JSONResponse(content={"error": "Unsupported file type"}, status_code=400)

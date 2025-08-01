@@ -34,6 +34,7 @@ supabase = ">=2.16.0,<3.0.0"
 celery = {extras = ["eventlet"], version = "^5.5.3"}
 eventlet = "^0.40.2"
 fpdf = "^1.7.2"
+nest-asyncio = "^1.6.0"
 
 [build-system]
 requires = ["poetry-core"]

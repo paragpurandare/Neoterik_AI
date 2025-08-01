@@ -8,7 +8,7 @@ from company_research_graph import run_job_research
 
 # Apply nest_asyncio once at the start of your Celery worker's execution context
 # This is typically done at the module level or in a worker startup hook
-nest_asyncio.apply()
+# nest_asyncio.apply()
 
 # Initalize the celery app
 celery_app = Celery(
@@ -16,6 +16,10 @@ celery_app = Celery(
     broker="amqp://guest:guest@localhost:5672//",
     backend="rpc://",
 )
+@celery_app.on_after_configure.connect
+def setup_nest_asyncio(sender, **kwargs):
+    import nest_asyncio
+    nest_asyncio.apply()
 
 # Define seperate queues
 celery_app.conf.task_queues = (
@@ -30,7 +34,16 @@ celery_app.conf.task_routes = {
 }
 
 def run_async(coro):
-    return asyncio.run(coro)
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coro)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coro)
 
 # Define the celery task
 @celery_app.task(name="run_cover_letter_workflow")

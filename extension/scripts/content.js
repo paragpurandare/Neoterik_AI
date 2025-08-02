@@ -10,6 +10,13 @@ function debounce(func, wait) {
 	};
 }
 
+// Helper to get current tabId (for content script, use chrome.runtime.sendMessage if needed)
+function getCurrentTabId(callback) {
+    chrome.runtime.sendMessage({ action: "getTabId" }, (response) => {
+        callback(response?.tabId);
+    });
+}
+
 // Debounced job page check
 const checkCurrentUrlDebounced = debounce(function () {
     const url = window.location.href;
@@ -32,11 +39,8 @@ const checkCurrentUrlDebounced = debounce(function () {
             console.error("Runtime error:", chrome.runtime.lastError);
             return;
         }
-
         if (response?.success && response.isJobPage) {
-            console.log("✅ Job page detected!");
             lastDetectedUrl = url; // Update last detected URL
-
             // Inject banner only once
             if (!document.getElementById("neoterik-job-detected")) {
                 chrome.runtime.sendMessage(
@@ -340,9 +344,10 @@ window.addEventListener("popstate", checkCurrentUrlDebounced);
 
 // Listen for messages from background script to inject banner
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-	if (request.action === "injectBanner") {
-		injectJobPageNotification(); // or whatever function injects your banner
-	}
+    if (request.action === "injectBanner") {
+        // Always inject the banner for this tab if job detected
+        injectJobPageNotification();
+    }
 });
 
  

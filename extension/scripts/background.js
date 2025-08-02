@@ -5,8 +5,8 @@ const EXTENSION_CALLBACK_URL = "http://localhost:3000/auth/extension-callback/";
 
 // Used for debouncing URL checks per tab
 const checkUrlTimers = {};
-const detectedJobsPerTab = {};
-const checkedUrlPerTab = {};
+// Add a new structure for per-tab job info
+const jobPagesByTab = {};
 
 // === Utility: Notify popup of login ===
 function notifyLoginStatusChanged() {
@@ -119,6 +119,20 @@ function shouldProceedWithDetection(url, callback) {
 	});
 }
 
+// Helper to update jobPagesByTab in chrome.storage.local
+async function updateJobPagesByTab(tabId, data) {
+    const { jobPagesByTab: stored } = await chrome.storage.local.get("jobPagesByTab");
+    const updated = { ...(stored || {}), [tabId]: { ...(stored?.[tabId] || {}), ...data } };
+    await chrome.storage.local.set({ jobPagesByTab: updated });
+    jobPagesByTab[tabId] = updated[tabId];
+}
+
+// Helper to get job info for a tab
+async function getJobPageForTab(tabId) {
+    const { jobPagesByTab: stored } = await chrome.storage.local.get("jobPagesByTab");
+    return (stored || {})[tabId] || null;
+}
+
 function pollTaskStatus(taskId) {
 	const interval = setInterval(async () => {
 		try{
@@ -172,108 +186,52 @@ function pollTaskStatus(taskId) {
 	}, 1000)
 }
 
-function pollResearchTaskStatus(taskId, session) {
+// Polling function per tab
+function pollResearchTaskStatusPerTab(tabId, taskId) {
     const interval = setInterval(async () => {
         try {
-            const { authToken } = await chrome.storage.local.get("authToken"); 
-            const res = await fetch(`${API_BASE_URL}/tasks/${taskId}`, {
-                headers: {
-                    "Authorization": `Bearer ${authToken}`
-                }
-            });
+            const res = await fetch(`${API_BASE_URL}/tasks/${taskId}`);
             const data = await res.json();
-
             if (data.status === 'SUCCESS') {
                 clearInterval(interval);
-                // The task is complete. The result is in data.result
-                const finalResult = data.result;
-
-                const { jobSession } = await chrome.storage.local.get("jobSession");
-                
-                // Update storage with the company research data
-                await chrome.storage.local.set({
-                    currentJobPage: {
-                        url: jobSession?.jobUrl,
-                        detected: Date.now(),
-                        jobData: finalResult,
-                    },
-                    jobSession: {
-                        ...jobSession,
-                        isAgentInProgress: false,
-                        isAgentFinished: true,
-                        isLocked: false,
-                    },
+                await updateJobPagesByTab(tabId, {
+                    agentStatus: "finished",
+                    agentResult: data.result,
+                    agentError: null,
                 });
-
-                // Send the research data back to the popup
                 chrome.runtime.sendMessage({
                     action: "agentFinished",
-                    researchData: finalResult
+                    tabId,
+                    researchData: data.result
                 });
-                
-                isAgentRunning = false;
-                
-                // Set up the session cleanup timeout
-                if (sessionCleanupTimeout) {
-                    clearTimeout(sessionCleanupTimeout);
-                    sessionCleanupTimeout = null;
-                }
-                sessionCleanupTimeout = setTimeout(async () => {
-                    const { jobSession } = await chrome.storage.local.get("jobSession");
-                    if (jobSession?.isLocked && !jobSession?.isCoverLetterGenerated) {
-                        chrome.notifications.create({
-                            type: "basic",
-                            iconUrl: "icons/icon128.png",
-                            title: "⏳ You left a job incomplete",
-                            message: "You started generating a cover letter. Please complete or skip.",
-                            priority: 2,
-                        });
-                        // After notification, clear session/job data and unlock detection
-                        await chrome.storage.local.remove([
-                            "jobSession",
-                            "currentJobPage",
-                        ]);
-                    }
-                    sessionCleanupTimeout = null;
-                }, 5 * 60 * 1000); // 5 minutes
-                
+                isAgentRunningPerTab[tabId] = false;
             } else if (data.status === "FAILURE") {
                 clearInterval(interval);
-                await chrome.storage.local.set({
-                    jobSession: {
-                        ...jobSession,
-                        isLocked: false,
-                        isAgentInProgress: false,
-                        isAgentFinished: false,
-                        agentError: data.error || "Company research failed on the server.",
-                    },
+                await updateJobPagesByTab(tabId, {
+                    agentStatus: "error",
+                    agentError: data.error || "Company research failed on the server."
                 });
                 chrome.runtime.sendMessage({
                     action: "agentError",
-                    error: data.error || "Company research failed on the server.",
+                    tabId,
+                    error: data.error || "Company research failed on the server."
                 });
-                isAgentRunning = false;
+                isAgentRunningPerTab[tabId] = false;
             }
         } catch (error) {
             clearInterval(interval);
-            console.error("Error polling company research task status:", error);
-            const { jobSession } = await chrome.storage.local.get("jobSession");
-            await chrome.storage.local.set({
-                jobSession: {
-                    ...jobSession,
-                    isLocked: false,
-                    isAgentInProgress: false,
-                    isAgentFinished: false,
-                    agentError: "Network error while checking research status.",
-                },
+            await updateJobPagesByTab(tabId, {
+                agentStatus: "error",
+                agentError: "Network error while checking research status."
             });
             chrome.runtime.sendMessage({
                 action: "agentError",
-                error: "Network error while checking research status.",
+                tabId,
+                error: "Network error while checking research status."
             });
-            isAgentRunning = false;
+            isAgentRunningPerTab[tabId] = false;
         }
-    }, 3000)
+    }, 3000);
 }
 
 // === Core Job Page Detection ===
@@ -281,11 +239,13 @@ function pollResearchTaskStatus(taskId, session) {
 let sessionCleanupTimeout = null;
 
 async function checkUrlWithApi(url, tabId) {
-    if (checkedUrlPerTab[tabId] === url) {
-        console.log(`🔄 Already checked URL for tab ${tabId}: ${url}`)
+    const jobPage = await getJobPageForTab(tabId);
+    if (jobPage && jobPage.url === url && jobPage.isJobDetected) {
+        console.log(`\uD83D\uDD04 Already checked URL for tab ${tabId}: ${url}`)
         return true;
     }
-    checkedUrlPerTab[tabId] = url; // Mark this URL as checked for this tab
+    // Mark this URL as checked for this tab
+    await updateJobPagesByTab(tabId, { isJobDetected: true });
 	try {
 		const response = await fetch(`${API_BASE_URL}/check-url`, {
 			method: "POST",
@@ -298,34 +258,19 @@ async function checkUrlWithApi(url, tabId) {
 		const data = await response.json();
 
         if (data.is_job_application) {
-			detectedJobsPerTab[tabId] = {
+			await updateJobPagesByTab(tabId, {
 				url,
 				jobData: data?.parsed_output || null,
 				detectedAt: Date.now(),
-			};
+				isJobDetected: true,
+				agentStatus: "idle",
+				agentResult: null,
+				coverLetter: null,
+			});
 			chrome.action.setBadgeText({ text: "JOB", tabId });
 			chrome.action.setBadgeBackgroundColor({ color: "#419D78", tabId });
 
-			await chrome.storage.local.set({
-				jobSession: {
-					jobUrl: url,
-					isJobDetected: true,
-					isAgentInProgress: false,
-					isAgentFinished: false,
-					isLocked: false,
-					isCoverLetterGenerated: false,
-					isCoverLetterGenerating: false,
-					coverLetterError: null,
-					isUserConfirmed: null,
-					timestamp: Date.now(),
-				},
-				currentJobPage: {
-					url,
-					detected: Date.now(),
-					detectedFrom: "check-url",
-					jobData: data?.parsed_output || null,
-				},
-			});
+			// Remove legacy chrome.storage.local.set({ jobSession, currentJobPage })
 			// Clear any previous cleanup timeout if new job detected
 			if (sessionCleanupTimeout) {
 				clearTimeout(sessionCleanupTimeout);
@@ -335,6 +280,7 @@ async function checkUrlWithApi(url, tabId) {
 			return true;
 		} else {
 			chrome.action.setBadgeText({ text: "", tabId });
+			await updateJobPagesByTab(tabId, { isJobDetected: false });
 			return false;
 		}
 	} catch (error) {
@@ -425,8 +371,8 @@ async function handleSaveCoverLetter(data, sendResponse) {
     }
 }
 
-// Add a global flag for agent running
-let isAgentRunning = false;
+// Refactor agent running flag to be per-tab
+const isAgentRunningPerTab = {};
 
 // === Content Script Communication ===
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -479,113 +425,56 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     if (request.action === "run_job_agent") {
         const tabId = request.tabId || sender.tab?.id;
-        const job = detectedJobsPerTab[tabId];
-        
-        if (isAgentRunning) {
-            sendResponse({ success: false, error: "Agent already running" });
+        if (!tabId) {
+            sendResponse({ success: false, error: "No tab ID" });
+            return false;
+        }
+        if (isAgentRunningPerTab[tabId]) {
+            sendResponse({ success: false, error: "Agent already running for this tab" });
             return true;
         }
-        isAgentRunning = true;
-         if (!job || !job.url) {
-            sendResponse({ success: false, error: "No job detected for this tab." });
-            return;
-        }
-        const payload = {
-            url: job.url,
-            scraped_html: job.jobData?.scraped_html,
-            job_title: job.jobData?.job_title,
-            company_name: job.jobData?.company_name,
-        };
-        console.log("[Background] Sending agentPayload to /run-agent:", payload.url && payload.job_title && payload.company_name);
-        chrome.storage.local.get(
-            ["jobSession", "currentJobPage"],
-            async (data) => {
-                let session = data.jobSession;
-                // If session is missing or jobUrl is missing, try to recover from currentJobPage
-                if (!session || !session.jobUrl) {
-                    if (data.currentJobPage && data.currentJobPage.url) {
-                        // Recreate jobSession from currentJobPage
-                        session = {
-                            jobUrl: data.currentJobPage.url,
-                            isJobDetected: true,
-                            isAgentInProgress: false,
-                            isAgentFinished: false,
-                            isLocked: false,
-                            isCoverLetterGenerated: false,
-                            isCoverLetterGenerating: false,
-                            coverLetterError: null,
-                            isUserConfirmed: null,
-                            timestamp: Date.now(),
-                        };
-                        await chrome.storage.local.set({ jobSession: session });
-                        console.warn(
-                            "[Background] Recovered jobSession from currentJobPage."
-                        );
-                    } else {
-                        console.error(
-                            "[Background] No jobSession or currentJobPage found. Cannot start agent."
-                        );
-                        chrome.runtime.sendMessage({
-                            action: "agentError",
-                            error: "No job detected. Please refresh the page and try again.",
-                        });
-                        isAgentRunning = false;
-                        return;
-                    }
-                }
-
-                // Set progress state
-                await chrome.storage.local.set({
-                    jobSession: {
-                        ...session,
-                        isAgentInProgress: true,
-                        isAgentFinished: false,
-                    },
-                });
-                console.log("[Background] Starting agent for:", session.jobUrl);
-
-                try {
-                    // Log the URL being sent to the agent
-                    console.log(
-                        "[Background] Calling /run-agent with URL:",
-                        session.jobUrl
-                    );
-                    const response = await fetch(`${API_BASE_URL}/run-agent`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify(payload),
-                    });
-                    
-                    if (!response.ok) {
-                        const errorResult = await response.json();
-                        throw new Error(errorResult.detail || "Failed to start the research task.");
-                    }
-
-                    const taskInfo = await response.json();
-                    console.log("[Background] Agent API response:", taskInfo);
-                    
-                    // Start polling for the result using the task ID
-                    pollResearchTaskStatus(taskInfo.task_id);
-                    
-                } catch (err) {
-                    await chrome.storage.local.set({
-                        jobSession: {
-                            ...session,
-                            isLocked: false,
-                            isAgentInProgress: false,
-                            isAgentFinished: false,
-                            agentError: err.message || "Agent error",
-                        },
-                    });
-                    console.error("[Background] Agent network/error:", err);
-                    chrome.runtime.sendMessage({
-                        action: "agentError",
-                        error: err.message || "Agent error",
-                    });
-                    isAgentRunning = false;
-                }
+        isAgentRunningPerTab[tabId] = true;
+        getJobPageForTab(tabId).then(async (job) => {
+            if (!job || !job.url) {
+                sendResponse({ success: false, error: "No job detected for this tab." });
+                isAgentRunningPerTab[tabId] = false;
+                return;
             }
-        );
+            if (job.agentStatus === "finished" && job.agentResult) {
+                // Already finished, just return cached result
+                sendResponse({ success: true, cached: true, result: job.agentResult });
+                isAgentRunningPerTab[tabId] = false;
+                return;
+            }
+            const payload = {
+                url: job.url,
+                scraped_html: job.jobData?.scraped_html,
+                job_title: job.jobData?.job_title,
+                company_name: job.jobData?.company_name,
+            };
+            await updateJobPagesByTab(tabId, { agentStatus: "in_progress" });
+            try {
+                const response = await fetch(`${API_BASE_URL}/run-agent`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
+                });
+                
+                if (!response.ok) {
+                    const errorResult = await response.json();
+                    throw new Error(errorResult.detail || "Failed to start the research task.");
+                }
+
+                const taskInfo = await response.json();
+                // Poll for result
+                pollResearchTaskStatusPerTab(tabId, taskInfo.task_id);
+                sendResponse({ success: true, started: true });
+            } catch (err) {
+                await updateJobPagesByTab(tabId, { agentStatus: "error", agentError: err.message });
+                sendResponse({ success: false, error: err.message });
+                isAgentRunningPerTab[tabId] = false;
+            }
+        });
         return true;
     }
 
@@ -719,20 +608,23 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 	}, 1500); // Add 1.5s debounce
 });
 
-chrome.tabs.onActivated.addListener(({ tabId }) => {
-	//check if this tab has a detected job
-	const jobInfo = detectedJobsPerTab[tabId];
-	if (jobInfo) {
-		// Ask content script to iject the banner
-		chrome.tabs.sendMessage(tabId, { action: "injectBanner" });
-	}
+// On tab switch, inject banner if jobPagesByTab[tabId] exists and isJobDetected
+chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+    const jobInfo = await getJobPageForTab(tabId);
+    if (jobInfo && jobInfo.isJobDetected) {
+        chrome.tabs.sendMessage(tabId, { action: "injectBanner" });
+    }
 });
 
 // === Tab Removed Cleanup ===
-chrome.tabs.onRemoved.addListener((tabId) => {
-    delete detectedJobsPerTab[tabId];
-    delete checkedUrlPerTab[tabId];
-	chrome.action.setBadgeText({ text: "", tabId });
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+    const { jobPagesByTab: stored } = await chrome.storage.local.get("jobPagesByTab");
+    if (stored && stored[tabId]) {
+        delete stored[tabId];
+        await chrome.storage.local.set({ jobPagesByTab: stored });
+    }
+    delete isAgentRunningPerTab[tabId];
+    chrome.action.setBadgeText({ text: "", tabId });
 	if (checkUrlTimers[tabId]) {
 		clearTimeout(checkUrlTimers[tabId]);
 		delete checkUrlTimers[tabId];

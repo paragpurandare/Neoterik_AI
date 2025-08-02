@@ -2,11 +2,11 @@
 
 const API_BASE_URL = "http://localhost:8000";
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
 	console.log("✅ Popup loaded");
 	initializeUI();
 	setupEventListeners();
-	setUIFromStorage();
+	await setUIFromStorage();
 });
 
 function initializeUI() {
@@ -107,18 +107,17 @@ function setupEventListeners() {
 	chrome.storage.onChanged.addListener((changes, area) => {
 		if (
 			area === "local" &&
-			(changes.jobSession ||
-				changes.currentJobPage ||
+			(changes.jobPagesByTab ||
 				changes.isLoggedIn ||
 				changes.user)
 		) {
 			setUIFromStorage();
-			const jobSession = changes.jobSession?.newValue;
-			if (jobSession?.agentError) {
-				showError(jobSession.agentError);
+			const jobPage = changes.jobPagesByTab?.newValue;
+			if (jobPage?.agentError) {
+				showError(jobPage.agentError);
 				setLoadingState(false, "");
 			}
-			if (jobSession?.isLocked && !jobSession?.isCoverLetterGenerated) {
+			if (jobPage?.isLocked && !jobPage?.isCoverLetterGenerated) {
 				window.sessionStorage.setItem("neoterik-locked-alert", "1");
 			} else {
 				window.sessionStorage.removeItem("neoterik-locked-alert");
@@ -774,84 +773,107 @@ function showGenerateTabAndPopulate() {
 	setLoadingState(false, ""); // Ensure button is not loading
 }
 
-// Restore original authentication UI/logic
-function setUIFromStorage() {
-	chrome.storage.local.get(
-		["isLoggedIn", "user", "jobSession", "currentJobPage"],
-		({ isLoggedIn, user, jobSession, currentJobPage }) => {
-			// Restore authentication UI
-			updateUI(!!isLoggedIn, user);
-
-			// Job/agent/cover letter state
-			const isAgentInProgress = jobSession?.isAgentInProgress;
-			const isAgentFinished = jobSession?.isAgentFinished;
-			const isCoverLetterGenerating = jobSession?.isCoverLetterGenerating;
-			const isCoverLetterGenerated = jobSession?.isCoverLetterGenerated;
-			const jobData = currentJobPage?.jobData;
-
-			// 1. Show preview if cover letter is generated
-			if (isCoverLetterGenerated && jobSession?.coverLetter) {
-				showCoverLetterPreview(jobSession.coverLetter);
-				switchTab("preview");
-				setLoadingState(false, "");
-				return;
-			}
-
-			// 2. Show loading if generating
-			if (isCoverLetterGenerating && jobData) {
-				populateFieldsFromGraph();
-				setLoadingState(
-					true,
-					"⏳ Our AI assistant is preparing your personalized cover letter..."
-				);
-				return;
-			}
-
-			if (isAgentInProgress) {
-				setAgentProgressState(
-					true,
-					"NeoterikAi's Agent Fetching Job Details.."
-				);
-				setLoadingState(false, "");
-				switchTab("generate");
-				return;
-			} else {
-				setAgentProgressState(false);
-			}
-
-			if (isAgentFinished && jobData) {
-				showGenerateTabAndPopulate();
-				return;
-			}
-
-			if (jobData) {
-				populateFieldsFromGraph();
-				switchTab("generate");
-				setLoadingState(false, "");
-				return;
-			}
-			// 6. Default: clear fields in generate tab if no jobData or after cover letter generated
-			clearGenerateTabFields();
-			setLoadingState(false, "");
-		}
-	);
+// Helper to get current tabId
+function getCurrentTabId() {
+    return new Promise((resolve) => {
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            resolve(tabs[0]?.id);
+        });
+    });
 }
 
-// Helper to clear all fields in generate tab
-function clearGenerateTabFields() {
-	[
-		"#company_name",
-		"#job_title",
-		"#job_description",
-		"#company_summary",
-		"#company_vision",
-		"#additional_notes",
-		"#preferred_skills",
-	].forEach((id) => {
-		const field = document.querySelector(id);
-		if (field) field.value = "";
-	});
+// Refactor setUIFromStorage to use jobPagesByTab[tabId]
+async function setUIFromStorage() {
+    const tabId = await getCurrentTabId();
+    chrome.storage.local.get([
+        "isLoggedIn", "user", "jobPagesByTab"
+    ], ({ isLoggedIn, user, jobPagesByTab }) => {
+        // Restore authentication UI
+        updateUI(!!isLoggedIn, user);
+        const jobPage = (jobPagesByTab || {})[tabId];
+        // Job/agent/cover letter state
+        const isAgentInProgress = jobPage?.agentStatus === "in_progress";
+        const isAgentFinished = jobPage?.agentStatus === "finished";
+        const isCoverLetterGenerating = jobPage?.isCoverLetterGenerating;
+        const isCoverLetterGenerated = jobPage?.isCoverLetterGenerated;
+        const jobData = jobPage?.jobData;
+        // 1. Show preview if cover letter is generated
+        if (isCoverLetterGenerated && jobPage?.coverLetter) {
+            showCoverLetterPreview(jobPage.coverLetter);
+            switchTab("preview");
+            setLoadingState(false, "");
+            return;
+        }
+        // 2. Show loading if generating
+        if (isCoverLetterGenerating && jobData) {
+            populateFieldsFromGraph(jobPage);
+            setLoadingState(
+                true,
+                "⏳ Our AI assistant is preparing your personalized cover letter..."
+            );
+            return;
+        }
+        if (isAgentInProgress) {
+            setAgentProgressState(
+                true,
+                "NeoterikAi's Agent Fetching Job Details.."
+            );
+            setLoadingState(false, "");
+            switchTab("generate");
+            return;
+        } else {
+            setAgentProgressState(false);
+        }
+        if (isAgentFinished && jobData) {
+            showGenerateTabAndPopulate(jobPage);
+            return;
+        }
+        if (jobData) {
+            populateFieldsFromGraph(jobPage);
+            switchTab("generate");
+            setLoadingState(false, "");
+            return;
+        }
+        // 6. Default: clear fields in generate tab if no jobData or after cover letter generated
+        clearGenerateTabFields();
+        setLoadingState(false, "");
+    });
 }
+
+// Update populateFieldsFromGraph to accept jobPage
+function populateFieldsFromGraph(jobPage) {
+    const job = jobPage?.jobData;
+    if (!job) return;
+    const fill = (id, val) => {
+        const field = document.querySelector(id);
+        if (field && val) field.value = val;
+    };
+    fill("#company_name", job.company_name);
+    fill("#job_title", job.job_title);
+    fill("#job_description", job.job_description);
+    fill("#company_summary", job.company_summary);
+    fill("#company_vision", job.company_vision);
+    fill("#additional_notes", job.additional_notes);
+    const skills = [
+        ...(job.preferred_qualifications || []),
+        ...(job.skillset || []),
+    ];
+    fill("#preferred_skills", skills.join(", "));
+}
+
+// Update showGenerateTabAndPopulate to accept jobPage
+function showGenerateTabAndPopulate(jobPage) {
+    switchTab("generate");
+    populateFieldsFromGraph(jobPage);
+    setLoadingState(false, ""); // Ensure button is not loading
+}
+
+// Listen for storage changes and update UI for the current tab
+chrome.storage.onChanged.addListener(async (changes, area) => {
+    if (area === "local" && changes.jobPagesByTab) {
+        await setUIFromStorage();
+    }
+});
 
 async function checkUploadStatus(userId) {
     console.log("🔍 Checking upload status for user:", userId);

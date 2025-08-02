@@ -545,7 +545,7 @@ def build_detect_only_graph():
 
 
 # 🧠 Build Graph
-def build_graph():
+def build_graph(start_at="detect"):
     graph = StateGraph(GraphState)
     graph.add_node("detect", detect_node)
     graph.add_node("search", search_node)
@@ -554,7 +554,7 @@ def build_graph():
     graph.add_node("tools", ToolNode(tools=[search_tool]))
     graph.add_node("capture", capture_output)
     
-    graph.set_entry_point("detect")
+    graph.set_entry_point(start_at)
     graph.add_conditional_edges(
         "detect",
         lambda state: "search" if state["is_job_page"] else END,
@@ -568,35 +568,54 @@ def build_graph():
     graph.add_edge("capture", END)
     return graph.compile()
 
-# 🚀 Runner
-async def run_job_research(job_url: str) -> CompanyResearchOutput | None:
+async def run_job_research(job_url: str, scraped_html: str = "", job_title: str = "", company_name: str = "") -> CompanyResearchOutput | None:
     """
-    The main execution function to run the job research agent.
+    Main execution function to run the job research agent.
+    If all scraped data is present, skip detect node for speed.
     """
-    print(f"\n Initializing job research for: {job_url}")
-    graph = build_graph()
-    
-    initial_state = GraphState(
-        job_url=job_url,
-        is_job_page=False,
-        scraped_html_text="",
-        job_title="",
-        company_name="",
-        search_results="",
-        job_search_results="",
-        job_summary_info="",
-        linkedin_results="",
-        messages=[],
-        final_output=None
-    )
-    
+    print(f"\n[run_job_research] Starting for: {job_url}")
+    # Decide entry point and initial state
+    if job_url and job_title and company_name:
+        print("[run_job_research] Skipping detect node, starting at 'search'")
+        graph = build_graph(start_at="search")
+        initial_state = GraphState(
+            job_url=job_url,
+            is_job_page=True,
+            scraped_html=scraped_html,
+            job_title=job_title,
+            company_name=company_name,
+            search_results="",
+            job_search_results="",
+            job_summary_info="",
+            linkedin_results="",
+            messages=[],
+            final_output=None
+        )
+    else:
+        print("[run_job_research] Running full graph from detect node")
+        graph = build_graph(start_at="detect")
+        initial_state = GraphState(
+            job_url=job_url,
+            is_job_page=False,
+            scraped_html="",
+            job_title="",
+            company_name="",
+            search_results="",
+            job_search_results="",
+            job_summary_info="",
+            linkedin_results="",
+            messages=[],
+            final_output=None
+        )
     final_state = await graph.ainvoke(initial_state)
-    
     if final_state and final_state.get("final_output"):
-        print("\n Research complete. Final output generated.")
+        print("\n[run_job_research] Research complete. Final output generated.")
         try:
             parsed = parse_llm_output(final_state["final_output"])
-            return parsed  # <-- This is a Pydantic model
+            return parsed
         except Exception as e:
             print(f"⚠️ Parse Error: {e}")
             return None
+    else:
+        print("[run_job_research] No final output from agent.")
+        return None

@@ -120,6 +120,12 @@ class URLCheckRequest(BaseModel):
 class GitHubParseRequest(BaseModel): # Model for the new endpoint's input
     github_username: str
 
+class RunAgentRequest(BaseModel):
+    url: str
+    scraped_html: str = ""
+    job_title: str = ""
+    company_name: str = ""
+
 # Comprehensive list of job board URL patterns
 KNOWN_JOB_BOARD_PATTERNS = [
     r"job-boards\.greenhouse\.io/.+/jobs/\d+",
@@ -152,8 +158,11 @@ async def check_url(data: URLCheckRequest):
         # Return is_job_application only based on detect_node
         return JSONResponse(content={
             "is_job_application": result.get("is_job_page", False),
+            "parsed_output": {
             "job_title": result.get("job_title", ""),
-            "company_name": result.get("company_name", "")
+            "company_name": result.get("company_name", ""),
+            "scraped_html": result.get("scraped_html", ""),
+            }
         }, status_code=200)
         
     except Exception as e:
@@ -164,13 +173,14 @@ async def check_url(data: URLCheckRequest):
     
 # Endpoint to run the full job research graph
 @app.post("/run-agent")
-async def run_agent_api(data: URLCheckRequest):
+async def run_agent_api(data: RunAgentRequest):
     """
     Receives a URL and starts the company research task in the background.
     """
     try:
+        print(f"[API] /run-agent received: url={data.url}, job_title={data.job_title}, company_name={data.company_name}")
         # Dispatch the Celery task to run the job research graph
-        task = run_job_research_task.apply_async(args=[data.url])
+        task = run_job_research_task.apply_async(args=[data.url, data.scraped_html, data.job_title, data.company_name])
         print(f"Dispatched company research task {task.id} to queue.")
         return {"task_id": task.id, "status": "Processing"}
     except Exception as e:
@@ -538,37 +548,49 @@ def clean_cover_letter(text: str) -> str:
     cleaned = unicodedata.normalize('NFKD', cleaned).encode('latin1', 'replace').decode('latin1')
     return cleaned
 
+import io
+import re
+import unicodedata
+
+from fastapi.responses import StreamingResponse, Response, JSONResponse
+from fpdf import FPDF
+
+
 @app.post("/download-cover-letter")
 async def download_cover_letter(request: DownloadRequest):
-    """
-    Generates a file (PDF or TXT) on the server and returns it for download.
-    Cleans the content and encodes as UTF-8.
-    """
-    filename = f"{request.baseFilename}.{request.fileType}"
-    cleaned_text = clean_cover_letter(request.coverLetterText)
+    filename = f"{request.baseFilename}.pdf"
+    # 1. Clean & normalize text (ASCII-safe for Latin-1 built-in fonts)
+    txt = clean_cover_letter(request.coverLetterText)
+    txt = (
+        txt.replace("–", "-")
+           .replace("—", "-")
+           .replace("“", '"').replace("”", '"')
+           .replace("‘", "'").replace("’", "'")
+    )
+    txt = re.sub(r'(?m)^\s*-\s*', "", txt)
 
-    if request.fileType == 'pdf':
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.set_font("Helvetica", size=11)
-        pdf.multi_cell(0, 5, cleaned_text)
-        raw = pdf.output(dest='S')
-        # FPDF PDF output is latin1, but for broad compatibility use utf-8 if possible
-        if isinstance(raw, str):
-            pdf_content_bytes = raw.encode('latin1')
-        else:
-            pdf_content_bytes = bytes(raw)
-        return Response(
-            content=pdf_content_bytes,
-            media_type='application/pdf',
-            headers={'Content-Disposition': f'attachment; filename="{filename}"'}
-        )
+    # 2. Split into ~3-sentence paragraphs
+    sentences = re.split(r"(?<=[.?!])\s+", txt.strip())
+    paras = [" ".join(sentences[i : i + 3]) for i in range(0, len(sentences), 3)]
 
-    elif request.fileType == 'txt':
-        return Response(
-            content=cleaned_text.encode('utf-8'),
-            media_type='text/plain; charset=utf-8',
-            headers={'Content-Disposition': f'attachment; filename="{filename}"'}
-        )
-    
-    return JSONResponse(content={"error": "Unsupported file type"}, status_code=400)
+    # 3. Build PDF in memory
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(True, margin=15)
+    pdf.set_font("Helvetica", size=11)
+
+    for p in paras:
+        pdf.multi_cell(0, 6, p)
+        pdf.ln(4)
+
+    # Write PDF to bytes
+    pdf_bytes = pdf.output(dest="S").encode("latin1")
+    buf = io.BytesIO(pdf_bytes)
+    buf.seek(0)
+
+    # 4. Stream back as one-click download
+    return StreamingResponse(
+        buf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

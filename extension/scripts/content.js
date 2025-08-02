@@ -1,6 +1,7 @@
 console.log("Neoterik Cover Letter Assistant: Content script loaded");
 
 // Debounce helper
+let lastDetectedUrl = null;
 function debounce(func, wait) {
 	let timeout;
 	return function (...args) {
@@ -11,30 +12,44 @@ function debounce(func, wait) {
 
 // Debounced job page check
 const checkCurrentUrlDebounced = debounce(function () {
-	const url = window.location.href;
+    const url = window.location.href;
+    if (lastDetectedUrl === url) {
+        // If already detected, still inject the banner if not present
+        if (!document.getElementById("neoterik-job-detected")) {
+            chrome.runtime.sendMessage(
+                { action: "shouldInjectBanner", url },
+                (response) => {
+                    if (response?.allow) {
+                        injectJobPageNotification();
+                    }
+                }
+            );
+        }
+        return;
+    }
+    chrome.runtime.sendMessage({ action: "checkUrl", url }, (response) => {
+        if (chrome.runtime.lastError) {
+            console.error("Runtime error:", chrome.runtime.lastError);
+            return;
+        }
 
-	chrome.runtime.sendMessage({ action: "checkUrl", url }, (response) => {
-		if (chrome.runtime.lastError) {
-			console.error("Runtime error:", chrome.runtime.lastError);
-			return;
-		}
+        if (response?.success && response.isJobPage) {
+            console.log("✅ Job page detected!");
+            lastDetectedUrl = url; // Update last detected URL
 
-		if (response?.success && response.isJobPage) {
-			console.log("✅ Job page detected!");
-
-			// Inject banner only once
-			if (!document.getElementById("neoterik-job-detected")) {
-				chrome.runtime.sendMessage(
-					{ action: "shouldInjectBanner", url },
-					(response) => {
-						if (response?.allow) {
-							injectJobPageNotification();
-						}
-					}
-				);
-			}
-		}
-	});
+            // Inject banner only once
+            if (!document.getElementById("neoterik-job-detected")) {
+                chrome.runtime.sendMessage(
+                    { action: "shouldInjectBanner", url },
+                    (response) => {
+                        if (response?.allow) {
+                            injectJobPageNotification();
+                        }
+                    }
+                );
+            }
+        }
+    });
 }, 1000);
 
 // Add a global flag
@@ -314,7 +329,8 @@ let lastUrl = location.href;
 new MutationObserver(() => {
 	const url = location.href;
 	if (url !== lastUrl) {
-		lastUrl = url;
+        lastUrl = url;
+        lastDetectedUrl = null; // Reset last detected URL
 		checkCurrentUrlDebounced();
 	}
 }).observe(document, { subtree: true, childList: true });
@@ -328,3 +344,5 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 		injectJobPageNotification(); // or whatever function injects your banner
 	}
 });
+
+ 

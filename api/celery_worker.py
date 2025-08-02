@@ -65,13 +65,14 @@ def run_unified_workflow_task(initial_state: dict):
     return final_state.get("context", {})
 
 @celery_app.task(name="run_job_research_task")
-def run_job_research_task(job_url: str):
+def run_job_research_task(job_url: str, scraped_html: str = "", job_title: str = "", company_name: str = ""):
     """
     [cite_start]This new task handles the company research workflow. [cite: 48]
     It will be sent to the 'company-research-queue'.
     """
-    print(f"Starting company research task for URL: {job_url}")
+    # print(f"Starting company research task for URL: {job_url}")
+    print(f"[Celery] run_job_research_task called with: {job_url}, {job_title}, {company_name}")
     # [cite_start]This function comes from your company_search_agent.txt file [cite: 48]
-    result = run_async(run_job_research(job_url))
+    result = run_async(run_job_research(job_url, scraped_html, job_title, company_name))
     print("Company Research finished.")
     return result.model_dump() if result else None

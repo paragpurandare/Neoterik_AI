@@ -6,6 +6,7 @@ const EXTENSION_CALLBACK_URL = "http://localhost:3000/auth/extension-callback/";
 // Used for debouncing URL checks per tab
 const checkUrlTimers = {};
 const detectedJobsPerTab = {};
+const checkedUrlPerTab = {};
 
 // === Utility: Notify popup of login ===
 function notifyLoginStatusChanged() {
@@ -168,7 +169,7 @@ function pollTaskStatus(taskId) {
                 error: "Network error while checking status.",
             });
         }
-	}, 3000)
+	}, 1000)
 }
 
 function pollResearchTaskStatus(taskId, session) {
@@ -280,6 +281,11 @@ function pollResearchTaskStatus(taskId, session) {
 let sessionCleanupTimeout = null;
 
 async function checkUrlWithApi(url, tabId) {
+    if (checkedUrlPerTab[tabId] === url) {
+        console.log(`🔄 Already checked URL for tab ${tabId}: ${url}`)
+        return true;
+    }
+    checkedUrlPerTab[tabId] = url; // Mark this URL as checked for this tab
 	try {
 		const response = await fetch(`${API_BASE_URL}/check-url`, {
 			method: "POST",
@@ -472,11 +478,25 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 	}
 
     if (request.action === "run_job_agent") {
+        const tabId = request.tabId || sender.tab?.id;
+        const job = detectedJobsPerTab[tabId];
+        
         if (isAgentRunning) {
             sendResponse({ success: false, error: "Agent already running" });
             return true;
         }
         isAgentRunning = true;
+         if (!job || !job.url) {
+            sendResponse({ success: false, error: "No job detected for this tab." });
+            return;
+        }
+        const payload = {
+            url: job.url,
+            scraped_html: job.jobData?.scraped_html,
+            job_title: job.jobData?.job_title,
+            company_name: job.jobData?.company_name,
+        };
+        console.log("[Background] Sending agentPayload to /run-agent:", payload.url && payload.job_title && payload.company_name);
         chrome.storage.local.get(
             ["jobSession", "currentJobPage"],
             async (data) => {
@@ -533,7 +553,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     const response = await fetch(`${API_BASE_URL}/run-agent`, {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ url: session.jobUrl }),
+                        body: JSON.stringify(payload),
                     });
                     
                     if (!response.ok) {
@@ -710,7 +730,8 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
 
 // === Tab Removed Cleanup ===
 chrome.tabs.onRemoved.addListener((tabId) => {
-	delete detectedJobsPerTab[tabId];
+    delete detectedJobsPerTab[tabId];
+    delete checkedUrlPerTab[tabId];
 	chrome.action.setBadgeText({ text: "", tabId });
 	if (checkUrlTimers[tabId]) {
 		clearTimeout(checkUrlTimers[tabId]);

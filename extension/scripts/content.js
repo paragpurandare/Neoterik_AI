@@ -1,73 +1,30 @@
-console.log("Neoterik Cover Letter Assistant: Content script loaded");
+// File: extension/scripts/content.js
 
-// Debounce helper
-let lastDetectedUrl = null;
-function debounce(func, wait) {
-	let timeout;
-	return function (...args) {
-		clearTimeout(timeout);
-		timeout = setTimeout(() => func.apply(this, args), wait);
-	};
-}
-
-// Helper to get current tabId (for content script, use chrome.runtime.sendMessage if needed)
-function getCurrentTabId(callback) {
-    chrome.runtime.sendMessage({ action: "getTabId" }, (response) => {
-        callback(response?.tabId);
-    });
-}
-
-// Debounced job page check
-const checkCurrentUrlDebounced = debounce(function () {
-    const url = window.location.href;
-    if (lastDetectedUrl === url) {
-        // If already detected, still inject the banner if not present
-        if (!document.getElementById("neoterik-job-detected")) {
-            chrome.runtime.sendMessage(
-                { action: "shouldInjectBanner", url },
-                (response) => {
-                    if (response?.allow) {
-                        injectJobPageNotification();
-                    }
-                }
-            );
-        }
-        return;
-    }
-    chrome.runtime.sendMessage({ action: "checkUrl", url }, (response) => {
-        if (chrome.runtime.lastError) {
-            console.error("Runtime error:", chrome.runtime.lastError);
-            return;
-        }
-        if (response?.success && response.isJobPage) {
-            lastDetectedUrl = url; // Update last detected URL
-            // Inject banner only once
-            if (!document.getElementById("neoterik-job-detected")) {
-                chrome.runtime.sendMessage(
-                    { action: "shouldInjectBanner", url },
-                    (response) => {
-                        if (response?.allow) {
-                            injectJobPageNotification();
-                        }
-                    }
-                );
-            }
-        }
-    });
-}, 1000);
-
-// Add a global flag
+const bannerId = "neoterik-job-detected";
+let bannerTimeout = null;
+let lastBannerUrl = null;
+let lastBannerShownAt = 0;
+let clicked = false;
 let isAgentRunning = false;
 
-// Inject the banner
-function injectJobPageNotification() {
-    document
-        .querySelectorAll("#neoterik-job-detected")
-        .forEach((b) => b.remove());
-    let clicked = false;
-    const notification = document.createElement("div");
-    notification.id = "neoterik-job-detected";
-    notification.style.cssText = `
+// Debounce utility for URL-based banner display
+function debounceBanner(url, delay = 1000) {
+    if (lastBannerUrl === url && Date.now() - lastBannerShownAt < delay) return false;
+    lastBannerUrl = url;
+    lastBannerShownAt = Date.now();
+    return true;
+}
+
+const ensureBanner = (show, opts = {}) => {
+    document.querySelectorAll(`#${bannerId}`).forEach(b => b.remove());
+    if (!show) return;
+
+    // Debounce by URL if provided
+    if (opts.url && !debounceBanner(opts.url, 1500)) return;
+
+    const el = document.createElement("div");
+    el.id = bannerId;
+    el.style.cssText = `
         position: fixed;
         top: 20px;
         right: 20px;
@@ -89,8 +46,7 @@ function injectJobPageNotification() {
         animation: slideIn 0.5s ease-out;
         backdrop-filter: blur(10px);
     `;
-
-    notification.innerHTML = `
+    el.innerHTML = `
         <div style="
             margin-right: 16px; 
             background: linear-gradient(135deg, #419D78, #37876A); 
@@ -155,199 +111,134 @@ function injectJobPageNotification() {
                 AI-Powered
             </div>
         </div>
+        <button id="neoterik-banner-dismiss" style="
+            background: rgba(156, 163, 175, 0.1);
+            border: 1px solid rgba(156, 163, 175, 0.2);
+            color: #9CA3AF;
+            font-size: 14px;
+            cursor: pointer;
+            margin-left: 12px;
+            width: 28px;
+            height: 28px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 8px;
+            transition: all 0.2s ease;
+            padding: 0;
+            line-height: 1;
+            font-weight: 500;
+            flex-shrink: 0;
+        ">×</button>
     `;
-
-    // Enhanced CSS animations matching Next.js app style
-    const style = document.createElement('style');
-    style.textContent = `
-        @keyframes slideIn {
-            from { 
-                transform: translateY(-20px) scale(0.95); 
-                opacity: 0; 
+    
+    // Add CSS keyframes only once
+    if (!document.getElementById("neoterik-banner-style")) {
+        const style = document.createElement('style');
+        style.id = "neoterik-banner-style";
+        style.textContent = `
+            @keyframes slideIn {
+                from { transform: translateY(-20px) scale(0.95); opacity: 0; }
+                to   { transform: translateY(0) scale(1); opacity: 1; }
             }
-            to { 
-                transform: translateY(0) scale(1); 
-                opacity: 1; 
+            @keyframes shimmer {
+                0% { left: -100%; }
+                100% { left: 100%; }
             }
-        }
-        @keyframes shimmer {
-            0% { left: -100%; }
-            100% { left: 100%; }
-        }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.5; transform: scale(1.2); }
-        }
-        @keyframes spin {
-            from { transform: rotate(0deg); }
-            to { transform: rotate(360deg); }
-        }
-        #neoterik-job-detected:hover {
-            transform: translateY(-4px);
-            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
-            border-color: #419D78;
-        }
-        #neoterik-job-detected:hover .icon-container {
-            transform: scale(1.05);
-        }
-    `;
-    document.head.appendChild(style);
+            @keyframes pulse {
+                0%, 100% { opacity: 1; transform: scale(1); }
+                50% { opacity: 0.5; transform: scale(1.2); }
+            }
+            @keyframes spin {
+                from { transform: rotate(0deg); }
+                to   { transform: rotate(360deg); }
+            }
+            #neoterik-job-detected:hover {
+                transform: translateY(-4px);
+                box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+                border-color: #419D78;
+            }
+        `;
+        document.head.appendChild(style);
+    }
 
-    // Run agent on click
-    notification.addEventListener("click", () => {
+    // Banner click: start agent
+    el.addEventListener("click", (e) => {
         if (clicked || isAgentRunning) return;
         clicked = true;
         isAgentRunning = true;
-        console.log("📧 Banner clicked: Starting job agent...");
-        
-        // Disable interaction and show loading state
-        notification.style.pointerEvents = "none";
-        notification.style.opacity = "0.9";
-        notification.style.transform = "scale(0.98)";
-        
-        // Replace content with loading state
-        notification.innerHTML = `
-            <div style="
-                margin-right: 16px; 
-                background: linear-gradient(135deg, #419D78, #37876A); 
-                border-radius: 12px; 
-                width: 48px; 
-                height: 48px; 
-                display: flex; 
-                align-items: center; 
-                justify-content: center;
-                box-shadow: 0 4px 12px rgba(65, 157, 120, 0.3);
-            ">
-                <div style="
-                    width: 20px; 
-                    height: 20px; 
-                    border: 2px solid rgba(255,255,255,0.3); 
-                    border-top: 2px solid white; 
-                    border-radius: 50%; 
-                    animation: spin 0.8s linear infinite;
-                "></div>
+        if (e.target.id === "neoterik-banner-dismiss") return;
+        el.style.pointerEvents = "none";
+        el.style.opacity = "0.9";
+        el.style.transform = "scale(0.98)";
+        el.innerHTML = `
+            <div style="margin-right: 16px; background: linear-gradient(135deg, #419D78, #37876A); border-radius: 12px; width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 12px rgba(65, 157, 120, 0.3);">
+                <div style="width: 20px; height: 20px; border: 2px solid rgba(255,255,255,0.3); border-top: 2px solid white; border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
             </div>
             <div style="flex: 1; min-width: 0;">
-                <div style="
-                    font-weight: 700; 
-                    margin-bottom: 6px; 
-                    font-size: 16px; 
-                    color: #F9FAFB;
-                ">Analyzing job posting...</div>
-                <div style="
-                    font-size: 13px; 
-                    color: #9CA3AF;
-                ">AI is crafting your perfect cover letter</div>
-                <div style="
-                    margin-top: 8px;
-                    width: 100%;
-                    height: 4px;
-                    background: #374151;
-                    border-radius: 2px;
-                    overflow: hidden;
-                ">
-                    <div style="
-                        width: 60%;
-                        height: 100%;
-                        background: linear-gradient(90deg, #419D78, #6EE7B7);
-                        border-radius: 2px;
-                        animation: pulse 1.5s ease-in-out infinite;
-                    "></div>
+                <div style="font-weight: 700; margin-bottom: 6px; font-size: 16px; color: #F9FAFB;">Analyzing job posting...</div>
+                <div style="font-size: 13px; color: #9CA3AF;">AI is crafting your perfect cover letter</div>
+                <div style="margin-top: 8px; width: 100%; height: 4px; background: #374151; border-radius: 2px; overflow: hidden;">
+                    <div style="width: 60%; height: 100%; background: linear-gradient(90deg, #419D78, #6EE7B7); border-radius: 2px; animation: pulse 1.5s ease-in-out infinite;"></div>
                 </div>
             </div>
         `;
-
-        chrome.runtime.sendMessage({ action: "run_job_agent" }, () => {
-            isAgentRunning = false;
-        });
-
-        // Remove banner with nice animation
+        chrome.runtime.sendMessage({ action: "run_job_agent" });
         setTimeout(() => {
-            notification.style.opacity = "0";
-            notification.style.transform = "translateY(-20px) scale(0.95)";
-            setTimeout(() => notification.remove(), 300);
-        }, 2000);
-
-        // Open popup after delay
+            el.style.opacity = "0";
+            el.style.transform = "translateY(-20px) scale(0.95)";
+            setTimeout(() => el.remove(), 300);
+        }, 3000);
         setTimeout(() => {
             chrome.runtime.sendMessage({ action: "openPopup" });
         }, 3000);
     });
 
-    // Enhanced dismiss button
-    const dismissBtn = document.createElement("button");
-    dismissBtn.style.cssText = `
-        background: rgba(156, 163, 175, 0.1);
-        border: 1px solid rgba(156, 163, 175, 0.2);
-        color: #9CA3AF;
-        font-size: 14px;
-        cursor: pointer;
-        margin-left: 12px;
-        width: 28px;
-        height: 28px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        border-radius: 8px;
-        transition: all 0.2s ease;
-        padding: 0;
-        line-height: 1;
-        font-weight: 500;
-        flex-shrink: 0;
-    `;
-    dismissBtn.innerHTML = "×";
-    
-    dismissBtn.addEventListener("click", (e) => {
+    // Dismiss button
+    el.querySelector("#neoterik-banner-dismiss").addEventListener("click", (e) => {
         e.stopPropagation();
-        notification.style.opacity = "0";
-        notification.style.transform = "translateY(-20px) scale(0.95)";
-        setTimeout(() => notification.remove(), 300);
+        el.style.opacity = "0";
+        el.style.transform = "translateY(-20px) scale(0.95)";
+        setTimeout(() => el.remove(), 300);
         chrome.runtime.sendMessage({ action: "bannerDismissed" });
     });
-    
-    dismissBtn.addEventListener("mouseover", () => {
-        dismissBtn.style.background = "rgba(248, 113, 113, 0.1)";
-        dismissBtn.style.borderColor = "rgba(248, 113, 113, 0.3)";
-        dismissBtn.style.color = "#F87171";
-        dismissBtn.style.transform = "scale(1.05)";
-    });
-    
-    dismissBtn.addEventListener("mouseout", () => {
-        dismissBtn.style.background = "rgba(156, 163, 175, 0.1)";
-        dismissBtn.style.borderColor = "rgba(156, 163, 175, 0.2)";
-        dismissBtn.style.color = "#9CA3AF";
-        dismissBtn.style.transform = "scale(1)";
-    });
-    
-    notification.appendChild(dismissBtn);
-    document.body.appendChild(notification);
-}
 
-// Run on initial load
-setTimeout(() => {
-	checkCurrentUrlDebounced();
-}, 2000);
+    document.body.appendChild(el);
+};
 
-// Watch for URL changes (SPA, client routing)
-let lastUrl = location.href;
-new MutationObserver(() => {
-	const url = location.href;
-	if (url !== lastUrl) {
-        lastUrl = url;
-        lastDetectedUrl = null; // Reset last detected URL
-		checkCurrentUrlDebounced();
-	}
-}).observe(document, { subtree: true, childList: true });
-
-// For history navigation
-window.addEventListener("popstate", checkCurrentUrlDebounced);
-
-// Listen for messages from background script to inject banner
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === "injectBanner") {
-        // Always inject the banner for this tab if job detected
-        injectJobPageNotification();
+// --- Listen for background messages ---
+chrome.runtime.onMessage.addListener((msg) => {
+    switch (msg.action) {
+        case "jobDetected":
+            ensureBanner(true, { url: window.location.href });
+            break;
+        case "agentState":
+            if (msg.state === "running" || msg.state === "finished"){
+                clicked = false;
+                isAgentRunning = false;
+                ensureBanner(false);
+            }
+            if (msg.state === "error") {
+                clicked = false;
+                isAgentRunning = false;
+                ensureBanner(true, { url: window.location.href });
+            } 
+            break;
+        case "agentBlocked":
+            alert("Please wait: research is already running in another tab.");
+            break;
     }
 });
 
- 
+// --- On load, ask background if we should show banner (debounced by URL) ---
+(async () => {
+    const tabId = await new Promise((res) =>
+        chrome.runtime.sendMessage({ action: "getTabId" }, (r) => res(r.tabId))
+    );
+    const { jobPagesByTab } = await chrome.storage.local.get("jobPagesByTab");
+    const tabState = jobPagesByTab?.[tabId];
+    if (tabState?.detected && tabState.url === window.location.href && tabState.agent?.status !== "running" && tabState.agent?.status !== "finished") {
+        ensureBanner(true, { url: tabState.url || window.location.href });
+    }
+})();
+
